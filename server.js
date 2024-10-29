@@ -1,14 +1,8 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const axios = require('axios');
-const cron = require('node-cron');
-const dotenv = require('dotenv');
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_BASE_URL = process.env.API_BASE_URL; // Your database API endpoint
 
 app.use(bodyParser.json());
 
@@ -18,7 +12,7 @@ async function getHotelData() {
     const response = await axios.get(`${API_BASE_URL}/hotel`);
     return response.data;
   } catch (error) {
-    console.error('Error al obtener los datos del hotel:', error);
+    console.error('Error fetching hotel data:', error);
     throw error;
   }
 }
@@ -61,7 +55,7 @@ async function syncWithOTA() {
 
     console.log('Synced with OTA:', response.data);
   } catch (error) {
-    console.error('Error al sincronizar la OTA:', error);
+    console.error('Error syncing with OTA:', error);
   }
 }
 
@@ -77,7 +71,7 @@ app.get('/api/hotel-data', async (req, res) => {
     const hotelData = await getHotelData();
     res.json(hotelData);
   } catch (error) {
-    res.status(500).json({ error: 'Error al obtener los datos del hotel' });
+    res.status(500).json({ error: 'Error fetching hotel data' });
   }
 });
 
@@ -89,55 +83,55 @@ app.get('/propiedades/:id/disponibilidad', async (req, res) => {
     if (!room) {
       return res.status(404).json({ error: 'Habitación no encontrada' });
     }
-    res.json(room.availability);
-  } catch (error) {
-    console.error('Error al obtener disponibilidad de la habitación:', error);
-    res.status(500).json({ error: 'Error al obtener disponibilidad de la habitación' });
-  }
+    return dates;
+}
+
+app.get('/propiedades', (req, res) => {
+    res.status(200).json(propiedades);
 });
-app.get('/propiedades/:id/disponibilidad', async (req, res) => {
+
+app.get('/propiedades/:id/disponibilidad', (req, res) => {
     const { id } = req.params;
-    try {
-      const hotelData = await getHotelData();
-      const room = hotelData.rooms.find(r => r.id === id);
-      if (!room) {
-        return res.status(404).json({ error: 'Habitación no encontrada' });
-      }
-      res.json(room.availability);
-    } catch (error) {
-      console.error('Error al obtener disponibilidad de la habitación:', error);
-      res.status(500).json({ error: 'Error al obtener disponibilidad de la habitación' });
+    
+    const propiedad = propiedades.find(p => p.id === id);
+
+    if (!propiedad) {
+        return res.status(404).json({ error: 'Propiedad no encontrada' });
     }
-  });
-  
 
-app.get('/buscar', async (req, res) => {
-  const { fechaInicio, fechaFin, tipo, ubicacion, maxPrecio, minCalificacion } = req.query;
-  try {
-    const hotelData = await getHotelData();
-    const availableRooms = hotelData.rooms.filter(room => {
-      const isAvailable = room.availability.every(date => 
-        (date.date >= fechaInicio && date.date <= fechaFin) ? date.available : true
-      );
-      const meetsType = !tipo || room.roomType === tipo;
-      const meetsPrice = !maxPrecio || room.price <= maxPrecio;
-      // Assuming hotel has a rating property
-      const meetsRating = !minCalificacion || hotelData.rating >= minCalificacion;
+    const disponibilidad = propiedad.disponibilidad;
+    res.status(200).json(disponibilidad);
+});
 
-      return isAvailable && meetsType && meetsPrice && meetsRating;
+app.get('/buscar', (req, res) => {
+    const { fechaInicio, fechaFin, tipo, ubicacion } = req.query;
+
+    if (!fechaInicio || !fechaFin || !tipo || !ubicacion) {
+        return res.status(400).json({ error: 'Faltan parámetros de búsqueda' });
+    }
+
+    const propiedadesDisponibles = propiedades.filter(propiedad => {
+        const fechasReservadas = reservas.filter(reserva => 
+            reserva.propiedadId === propiedad.id &&
+            !(fechaFin < reserva.fechaInicio || fechaInicio > reserva.fechaFin)
+        );
+
+        const estaDisponible = fechasReservadas.length === 0; 
+        const fechasDisponibles = propiedad.disponibilidad.filter(d => d.fecha >= fechaInicio && d.fecha <= fechaFin && d.disponible);      
+        const cumpleTipo = propiedad.tipo === tipo;
+        const cumpleUbicacion = propiedad.ubicacion.toLowerCase() === ubicacion.toLowerCase();
+
+        return estaDisponible && fechasDisponibles.length === (new Date(fechaFin).getDate() - new Date(fechaInicio).getDate() + 1) && cumpleTipo && cumpleUbicacion;
     });
 
-    res.status(200).json(availableRooms);
-  } catch (error) {
-    res.status(500).json({ error: 'Error al buscar propiedades' });
-  }
+    res.status(200).json(propiedadesDisponibles);
 });
 
-app.post('/reservas', async (req, res) => {
-  const { usuarioId, propiedadId, fechaInicio, fechaFin, roomType } = req.body;
+app.post('/reservas', (req, res) => {
+    const { usuarioId, propiedadId, fechaInicio, fechaFin } = req.body;
 
   if (!usuarioId || !propiedadId || !fechaInicio || !fechaFin || !roomType) {
-    return res.status(400).json({ error: 'Faltan datos de reserva requeridos' });
+    return res.status(400).json({ error: 'Missing required reservation data' });
   }
 
   try {
@@ -145,30 +139,46 @@ app.post('/reservas', async (req, res) => {
     const room = hotelData.rooms.find(r => r.roomType === roomType);
     
     if (!room) {
-      return res.status(404).json({ error: 'Tipo de habitación no encontrada' });
+      return res.status(404).json({ error: 'Room type not found' });
     }
 
-    // Update availability
-    const startDate = new Date(fechaInicio);
-    const endDate = new Date(fechaFin);
-    const datesToUpdate = [];
-    for (let d = startDate; d <= endDate; d.setDate(d.getDate() + 1)) {
-      datesToUpdate.push(d.toISOString().split('T')[0]);
+    const fechasReservadas = reservas.filter(r => r.propiedadId === propiedadId && 
+        (fechaInicio <= r.fechaFin && fechaFin >= r.fechaInicio));
+
+    if (fechasReservadas.length > 0) {
+        return res.status(400).json({ error: 'La propiedad no está disponible en las fechas seleccionadas' });
     }
 
-    await updateRoomAvailability(room.id, datesToUpdate, false);
+    const nuevaReserva = { 
+        id: (reservas.length + 1).toString(), 
+        usuarioId, 
+        propiedadId, 
+        fechaInicio, 
+        fechaFin, 
+        estado: 'confirmada' 
+    };
 
-    // Create reservation (you might want to add an endpoint for this in your API)
-    const reservationData = { usuarioId, propiedadId, fechaInicio, fechaFin, roomType };
-    const reservationResponse = await axios.post(`${API_BASE_URL}/reservations`, reservationData);
+    reservas.push(nuevaReserva);
 
-    // Trigger OTA sync
-    await syncWithOTA();
+    const fechas = getDatesBetween(new Date(fechaInicio), new Date(fechaFin));
+    fechas.forEach(fecha => {
+        const disponibilidad = propiedad.disponibilidad.find(d => d.fecha === fecha);
+        if (disponibilidad) {
+            disponibilidad.disponible = false;
+        }
+    });
 
-    res.status(201).json({ message: 'Tu reserva ha sido creada!', reservation: reservationResponse.data });
-  } catch (error) {
-    res.status(500).json({ error: 'Error al crear la reserva' });
-  }
+    res.status(201).json(nuevaReserva);
+});
+
+app.get('/reservas', (req, res) => {
+    res.status(200).json(reservas);
+});
+
+app.get('/usuarios/:usuarioId/reservas', (req, res) => {
+    const { usuarioId } = req.params;
+    const reservasUsuario = reservas.filter(r => r.usuarioId === usuarioId);
+    res.status(200).json(reservasUsuario);
 });
 
 app.get('/reservas', async (req, res) => {
@@ -176,7 +186,7 @@ app.get('/reservas', async (req, res) => {
     const reservationsResponse = await axios.get(`${API_BASE_URL}/reservations`);
     res.status(200).json(reservationsResponse.data);
   } catch (error) {
-    res.status(500).json({ error: 'Error error al recuperar las reservas' });
+    res.status(500).json({ error: 'Error fetching reservations' });
   }
 });
 
@@ -186,12 +196,12 @@ app.get('/usuarios/:usuarioId/reservas', async (req, res) => {
     const reservationsResponse = await axios.get(`${API_BASE_URL}/reservations?usuarioId=${usuarioId}`);
     res.status(200).json(reservationsResponse.data);
   } catch (error) {
-    res.status(500).json({ error: 'Error al recuperar las reservas de los usuarios' });
+    res.status(500).json({ error: 'Error fetching user reservations' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Servidor corriendo en http://localhost:${PORT}`);
 });
 
 /*
